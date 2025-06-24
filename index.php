@@ -115,6 +115,7 @@ $app->get('/forum', function($request, $response, $args) use($db) {
                 ],
                 'replies' => array_map(function($reply) {
                     return [
+                        'id' => (int)$reply['id'],
                         'author' => $reply['author'],
                         'content' => $reply['content'],
                         'date' => $reply['created_at'],
@@ -131,14 +132,36 @@ $app->get('/forum', function($request, $response, $args) use($db) {
     }
 });
 
+// OPTIONS /forum - Handle CORS preflight for forum
+$app->options('/forum', function($request, $response, $args) {
+    return $response->withStatus(200);
+});
+
 // POST /forum - Create a new forum thread
 $app->post('/forum', function($request, $response, $args) use($db) {
     try {
         $conn = $db->connect();
+        if (!$conn) {
+            throw new Exception("Database connection failed");
+        }
+        
         $data = $request->getParsedBody();
         
+        // Debug: Log the received data  
+        error_log("POST /forum - Received data: " . json_encode($data));
+        error_log("POST /forum - Request method: " . $_SERVER['REQUEST_METHOD']);
+        error_log("POST /forum - Content type: " . ($_SERVER['CONTENT_TYPE'] ?? 'not set'));
+        
+        if (!$data) {
+            throw new Exception("No data received");
+        }
+        
         if(!isset($data['title']) || !isset($data['mainPost'])) {
-            throw new Exception("Title and mainPost are required.");
+            throw new Exception("Title and mainPost are required. Received: " . json_encode($data));
+        }
+        
+        if (empty($data['title']) || empty($data['mainPost'])) {
+            throw new Exception("Title and mainPost cannot be empty");
         }
         
         $title = $data['title'];
@@ -165,10 +188,16 @@ $app->post('/forum', function($request, $response, $args) use($db) {
         
         $threadId = $conn->lastInsertId();
         
-        return $response->withJson([
+        if (!$threadId) {
+            throw new Exception("Failed to get thread ID after insert");
+        }
+        
+        $result = [
             "message" => "Forum thread created successfully",
-            "threadId" => $threadId
-        ], 201);
+            "threadId" => (int)$threadId
+        ];
+        
+        return $response->withJson($result, 201);
     } catch (Exception $e) {
         return $response->withJson(["error" => "Error creating forum thread: " . $e->getMessage()], 500);
     }
@@ -271,6 +300,181 @@ $app->delete('/forum/{threadId}/reply/{replyId}', function($request, $response, 
         ], 200);
     } catch (Exception $e) {
         return $response->withJson(["error" => "Error deleting reply: " . $e->getMessage()], 500);
+    }
+});
+
+// PUT /forum/{id} - Edit a forum thread
+$app->put('/forum/{id}', function($request, $response, $args) use($db) {
+    try {
+        $conn = $db->connect();
+        $threadId = $args['id'];
+        $data = $request->getParsedBody();
+        
+        // Debug: Log the received data  
+        error_log("PUT /forum/{$threadId} - Received data: " . json_encode($data));
+        
+        if(!isset($data['title']) || !isset($data['content'])) {
+            throw new Exception("Title and content are required. Received: " . json_encode($data));
+        }
+        
+        $title = $data['title'];
+        $content = $data['content'];
+        
+        // Check if thread exists
+        $checkSql = "SELECT id FROM forum_threads WHERE id = :thread_id";
+        $checkStmt = $conn->prepare($checkSql);
+        $checkStmt->bindValue(':thread_id', $threadId);
+        $checkStmt->execute();
+        
+        if ($checkStmt->rowCount() === 0) {
+            throw new Exception("Thread not found.");
+        }
+        
+        $sql = "UPDATE forum_threads SET title = :title, content = :content WHERE id = :thread_id";
+        $stmt = $conn->prepare($sql);
+        $stmt->bindValue(':title', $title);
+        $stmt->bindValue(':content', $content);
+        $stmt->bindValue(':thread_id', $threadId);
+        $stmt->execute();
+        
+        return $response->withJson([
+            "message" => "Thread updated successfully"
+        ], 200);
+    } catch (Exception $e) {
+        return $response->withJson(["error" => "Error updating thread: " . $e->getMessage()], 500);
+    }
+});
+
+// PUT /forum/{threadId}/reply/{replyId} - Edit a reply
+$app->put('/forum/{threadId}/reply/{replyId}', function($request, $response, $args) use($db) {
+    try {
+        $conn = $db->connect();
+        $threadId = $args['threadId'];
+        $replyId = $args['replyId'];
+        $data = $request->getParsedBody();
+        
+        if(!isset($data['content'])) {
+            throw new Exception("Content is required.");
+        }
+        
+        $content = $data['content'];
+        
+        // Check if reply exists
+        $checkSql = "SELECT id FROM forum_replies WHERE id = :reply_id AND thread_id = :thread_id";
+        $checkStmt = $conn->prepare($checkSql);
+        $checkStmt->bindValue(':reply_id', $replyId);
+        $checkStmt->bindValue(':thread_id', $threadId);
+        $checkStmt->execute();
+        
+        if ($checkStmt->rowCount() === 0) {
+            throw new Exception("Reply not found.");
+        }
+        
+        $sql = "UPDATE forum_replies SET content = :content WHERE id = :reply_id AND thread_id = :thread_id";
+        $stmt = $conn->prepare($sql);
+        $stmt->bindValue(':content', $content);
+        $stmt->bindValue(':reply_id', $replyId);
+        $stmt->bindValue(':thread_id', $threadId);
+        $stmt->execute();
+        
+        return $response->withJson([
+            "message" => "Reply updated successfully"
+        ], 200);
+    } catch (Exception $e) {
+        return $response->withJson(["error" => "Error updating reply: " . $e->getMessage()], 500);
+    }
+});
+
+// PUT /forum/{id}/like - Like/Unlike a forum thread
+$app->put('/forum/{id}/like', function($request, $response, $args) use($db) {
+    try {
+        $conn = $db->connect();
+        $threadId = $args['id'];
+        $data = $request->getParsedBody();
+        
+        $action = isset($data['action']) ? $data['action'] : 'toggle';
+        
+        // Check if thread exists
+        $checkSql = "SELECT likes FROM forum_threads WHERE id = :thread_id";
+        $checkStmt = $conn->prepare($checkSql);
+        $checkStmt->bindValue(':thread_id', $threadId);
+        $checkStmt->execute();
+        
+        if ($checkStmt->rowCount() === 0) {
+            throw new Exception("Thread not found.");
+        }
+        
+        $currentLikes = $checkStmt->fetch(PDO::FETCH_ASSOC)['likes'];
+        
+        if ($action === 'like') {
+            $newLikes = $currentLikes + 1;
+        } elseif ($action === 'unlike') {
+            $newLikes = max(0, $currentLikes - 1);
+        } else {
+            // Toggle - for now just increment (would need user tracking for proper toggle)
+            $newLikes = $currentLikes + 1;
+        }
+        
+        $sql = "UPDATE forum_threads SET likes = :likes WHERE id = :thread_id";
+        $stmt = $conn->prepare($sql);
+        $stmt->bindValue(':likes', $newLikes);
+        $stmt->bindValue(':thread_id', $threadId);
+        $stmt->execute();
+        
+        return $response->withJson([
+            "message" => "Thread like updated successfully",
+            "likes" => $newLikes
+        ], 200);
+    } catch (Exception $e) {
+        return $response->withJson(["error" => "Error updating thread like: " . $e->getMessage()], 500);
+    }
+});
+
+// PUT /forum/{threadId}/reply/{replyId}/like - Like/Unlike a reply
+$app->put('/forum/{threadId}/reply/{replyId}/like', function($request, $response, $args) use($db) {
+    try {
+        $conn = $db->connect();
+        $threadId = $args['threadId'];
+        $replyId = $args['replyId'];
+        $data = $request->getParsedBody();
+        
+        $action = isset($data['action']) ? $data['action'] : 'toggle';
+        
+        // Check if reply exists
+        $checkSql = "SELECT likes FROM forum_replies WHERE id = :reply_id AND thread_id = :thread_id";
+        $checkStmt = $conn->prepare($checkSql);
+        $checkStmt->bindValue(':reply_id', $replyId);
+        $checkStmt->bindValue(':thread_id', $threadId);
+        $checkStmt->execute();
+        
+        if ($checkStmt->rowCount() === 0) {
+            throw new Exception("Reply not found.");
+        }
+        
+        $currentLikes = $checkStmt->fetch(PDO::FETCH_ASSOC)['likes'];
+        
+        if ($action === 'like') {
+            $newLikes = $currentLikes + 1;
+        } elseif ($action === 'unlike') {
+            $newLikes = max(0, $currentLikes - 1);
+        } else {
+            // Toggle - for now just increment (would need user tracking for proper toggle)
+            $newLikes = $currentLikes + 1;
+        }
+        
+        $sql = "UPDATE forum_replies SET likes = :likes WHERE id = :reply_id AND thread_id = :thread_id";
+        $stmt = $conn->prepare($sql);
+        $stmt->bindValue(':likes', $newLikes);
+        $stmt->bindValue(':reply_id', $replyId);
+        $stmt->bindValue(':thread_id', $threadId);
+        $stmt->execute();
+        
+        return $response->withJson([
+            "message" => "Reply like updated successfully",
+            "likes" => $newLikes
+        ], 200);
+    } catch (Exception $e) {
+        return $response->withJson(["error" => "Error updating reply like: " . $e->getMessage()], 500);
     }
 });
 
